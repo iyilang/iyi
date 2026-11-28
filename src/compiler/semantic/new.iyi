@@ -279,9 +279,12 @@ end
 # Completes the generated `new` methods (the hosted define_new_methods): fills each
 # recorded expansion's body, adds the default `new` where no initialize is in the
 # ancestry, then makes each explicit initialize protected unless it had a visibility.
-# The expansions are consumed, so a later call only does the default-new check again,
-# which adds nothing a class already has.
+# The expansions are consumed, so a second run straight after a first adds nothing.
+# The result depends only on the program's shape (its types, their defs and parents),
+# so a run is skipped while the shape has not changed since the last one and no
+# expansion is waiting: every sub-visitor calls this, and a full run walks every class.
 pub def define_new_methods(program : SemanticProgram) : Nil
+  return if program.new_methods_epoch == program.shape_epoch && program.new_expansions.empty?
   expansions = program.new_expansions
   expansions.each do |ex|
     owner = ex.owner
@@ -301,5 +304,6 @@ pub def define_new_methods(program : SemanticProgram) : Nil
     end
   end
   expansions.clear
+  program.new_methods_epoch = program.shape_epoch
   nil
 end

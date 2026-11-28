@@ -518,6 +518,22 @@
   goes from 1,358 to 607 ms (2.74× the hosted front end, from 6.14×); the
   typed dump is unchanged on 1,068 inputs.
 
+- **The self-hosted front end no longer redoes shape-only work per typed
+  body.** Every sub-visitor ran `define_new_methods` over every class, and
+  every call rebuilt its lookup levels across the ancestors. A shape counter
+  on the program (`SemanticProgram#shape_epoch`, moved by `add_type`,
+  `add_def`, `include` and a superclass) now lets `define_new_methods` return
+  at once while nothing changed since its last run, and keeps the levels of a
+  call lookup per looked-up type, walk and name until the next change.
+  `enter_file_scope` normalizes a file name only when the name in the
+  location misses. On Linux (unoptimized typed dump, two runs each) the
+  front end over 113k generated lines goes from 5.7 to 2.1 s; the typed
+  dump is unchanged on 1,623 inputs. No source file reaches a shape
+  change after the first main visitor, so
+  `bench/selfhost_front_cache_probe.iyi` makes them through the API, and
+  `bench/selfhost_semantic_new_exercise.sh` proves that dropping an
+  invalidation or the normal-name lookup is caught.
+
 - **A freestanding wasm `--release` drops DWARF and keeps function names
   (#221).** The link adds `wasm-ld --strip-debug` when `--release` was given
   without `-d`, including `--release -O z`; the name section host stack

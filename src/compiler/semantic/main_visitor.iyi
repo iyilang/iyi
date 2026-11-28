@@ -528,7 +528,8 @@ pub class MainVisitor < TypeNodeHost
     @program.resolve_deferred_class_vars
     @literal_expander = LiteralExpander.new(@program.normalizer)
     # The generated `new` methods are completed before any body is typed: the
-    # declarations pass has recorded the expansions, and this consumes them (idempotent).
+    # declarations pass has recorded the expansions, and this consumes them. It returns
+    # at once when the program's shape has not changed since its last run.
     define_new_methods(@program)
     @current_type = @program
     @scope = nil
@@ -3433,6 +3434,32 @@ pub class MainVisitor < TypeNodeHost
     nil
   end
 
+  # The levels of a call lookup that declare *name* (own_defs is not nil), in walk order. A
+  # level that does not declare it adds nothing to lookup_arm_levels, so it is left out. The
+  # list depends only on the program's shape, so it is kept per looked-up type, walk and name
+  # (SemanticProgram#arm_levels_for, cleared when the shape changes) and is shared: callers
+  # must not change it.
+  def declared_arm_levels(type : Type, name : String, walk : ArmWalk) : Array(Type)
+    actual = type
+    actual = actual.as(VirtualType).base_type if actual.is_a?(VirtualType)
+    entry = @program.arm_levels_for(actual)
+    table = walk == ArmWalk::Modules ? entry.modules_walk : entry.parents_walk
+    if cached = table[name]?
+      return cached
+    end
+    levels = [] of Type
+    collect_arm_levels(actual, name, walk, levels, Set(UInt64).new)
+    declared = [] of Type
+    levels.each do |level|
+      declaring = level.is_a?(GenericInstanceType) ? level.as(GenericInstanceType).generic_type : level
+      if declaring.is_a?(ModuleType) && MethodLookup.own_defs(declaring.as(ModuleType), name)
+        declared << level
+      end
+    end
+    table[name] = declared
+    declared
+  end
+
   # Hosted method_lookup.cr:71-108 and 217-243: retain a separate level for
   # each owner so cover and module stopping happen at the same boundaries.
   # A generic instance metaclass can have the same printed name as its
@@ -3487,24 +3514,15 @@ pub class MainVisitor < TypeNodeHost
     end
     signature = CallSignature.new(name, arg_types, named_types, !call_node.block.nil?)
     signature.infer_class_vars = infer_class_vars
-    levels = [] of Type
-    collect_arm_levels(lookup_in, name, walk, levels, Set(UInt64).new)
-    if call_node.obj.nil?
-      has_candidates = false
-      levels.each do |level|
-        declaring = level.is_a?(GenericInstanceType) ? level.as(GenericInstanceType).generic_type : level
-        if declaring.is_a?(ModuleType) && MethodLookup.own_defs(declaring.as(ModuleType), name)
-          has_candidates = true
-        end
-      end
-      unless has_candidates
-        scoped = [] of Def
-        collect_scope_defs(lookup_in, name, scoped, Set(String).new)
-        unless scoped.empty?
-          if scope_owner = @program.def_owner(scoped[0])
-            owner = scope_owner
-            levels << scope_owner
-          end
+    levels = declared_arm_levels(lookup_in, name, walk)
+    # No level declares the name: a receiverless call looks in its scope's defs instead.
+    if call_node.obj.nil? && levels.empty?
+      scoped = [] of Def
+      collect_scope_defs(lookup_in, name, scoped, Set(String).new)
+      unless scoped.empty?
+        if scope_owner = @program.def_owner(scoped[0])
+          owner = scope_owner
+          levels = [scope_owner] of Type
         end
       end
     end
@@ -4290,11 +4308,18 @@ pub class MainVisitor < TypeNodeHost
 
   # iyi: the names a node's file imported become the names in scope (SPEC.md R-2b). A node with
   # no location (a generated def) keeps the scope it is typed from.
+  # The import tables are keyed by the name the file was loaded under; the normalized name
+  # is computed only when the raw one misses (normalize_path allocates).
   def enter_file_scope(node : ASTNode, required : Bool = false) : Nil
     if loc = node.location
-      filename = normalize_path(loc.filename)
-      imports = @program.file_imports[loc.filename]? || @program.file_imports[filename]?
-      defs = @program.file_import_defs[loc.filename]? || @program.file_import_defs[filename]?
+      raw = loc.filename
+      imports = @program.file_imports[raw]?
+      defs = @program.file_import_defs[raw]?
+      if imports.nil? || defs.nil?
+        filename = normalize_path(raw)
+        imports = imports || @program.file_imports[filename]?
+        defs = defs || @program.file_import_defs[filename]?
+      end
       if required && (imports.nil? || defs.nil?)
         raise("missing import table for #{loc.filename}")
       end

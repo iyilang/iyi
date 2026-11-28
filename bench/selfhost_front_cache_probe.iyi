@@ -1,0 +1,97 @@
+import compiler/foundation/location::{Location}
+import compiler/syntax/ast::{ASTNode, Def, Expressions, Nop}
+import compiler/syntax/parser::{Parser}
+import compiler/semantic/top_level::{ModuleType, SemanticProgram, TopLevelVisitor, Type}
+import compiler/semantic/main_visitor::{MainVisitor}
+
+# Probe for the self-hosted front end's caches, run by
+# bench/selfhost_semantic_new_exercise.sh with no arguments.
+#
+# The generated `new` methods (define_new_methods) and the call-lookup levels
+# (MainVisitor#declared_arm_levels) are redone only once the program's shape has
+# changed since they last ran (SemanticProgram#shape_epoch). Every pipeline today
+# declares everything before its first main visitor, so no source file reaches a
+# shape change after one. This probe makes them in phases, a main visitor typing
+# expressions after each, and checks that each change is seen: a def added to a
+# class, a module included, a struct declared.
+#
+# MainVisitor#enter_file_scope looks a file's import table up by the name in the
+# node's location and normalizes that name only when it misses. The typed dump's
+# files are always found by their own name, so the probe checks the miss: a table
+# kept under the normal name is found from a location spelled with `./`.
+#
+# Prints one line per check and exits 1 when any check fails.
+module SelfhostFrontCacheProbe
+  def self.declare(prog : SemanticProgram, source : String, filename : String) : Nil
+    node = prog.normalizer.normalize(Parser.new(source, filename).parse)
+    prog.file_imports[filename] = prog.current_imports
+    prog.file_import_defs[filename] = prog.current_import_defs
+    tl = TopLevelVisitor.new(prog, filename)
+    node.accept(tl)
+    tl.finish
+  end
+
+  # The type of each top-level expression of *source*, typed by a new main visitor.
+  def self.typed(prog : SemanticProgram, source : String, filename : String) : Array(String)
+    node = prog.normalizer.normalize(Parser.new(source, filename).parse)
+    prog.file_imports[filename] = prog.current_imports
+    prog.file_import_defs[filename] = prog.current_import_defs
+    mv = MainVisitor.new(prog)
+    mv.total = true
+    node.accept(mv)
+    exps = [node] of ASTNode
+    exps = node.as(Expressions).expressions if node.is_a?(Expressions)
+    exps.map do |exp|
+      t = mv.type_of?(exp)
+      t ? t.to_s : "untyped"
+    end
+  end
+
+  def self.check(label : String, got : String, want : String) : Bool
+    ok = got == want
+    puts "#{ok ? "ok  " : "FAIL"} #{label}: #{got} (want #{want})"
+    ok
+  end
+
+  def self.run : Int32
+    prog = SemanticProgram.new
+    prog.total_mode = true
+    failed = 0
+    declare(prog, "module Greets\n  def hello : Int32\n    1\n  end\nend\n\nclass Early\nend\n\nclass Plain\nend\n", "shape_a.iyi")
+    before = typed(prog, "Early.new.hello\nPlain.new.bye\n", "shape_a_use.iyi")
+    failed += 1 unless check("Early.new.hello before the include", before[0], "untyped")
+    failed += 1 unless check("Plain.new.bye before its def", before[1], "untyped")
+
+    declare(prog, "class Plain\n  def bye : Int32\n    2\n  end\nend\n", "shape_b.iyi")
+    failed += 1 unless check("Plain.new.bye after a def is added", typed(prog, "Plain.new.bye\n", "shape_b_use.iyi")[0], "Int32")
+
+    declare(prog, "class Early\n  include Greets\nend\n", "shape_c.iyi")
+    failed += 1 unless check("Early.new.hello after the include", typed(prog, "Early.new.hello\n", "shape_c_use.iyi")[0], "Int32")
+
+    declare(prog, "struct Late\nend\n", "shape_d.iyi")
+    failed += 1 unless check("Late.new after the struct is declared", typed(prog, "Late.new\n", "shape_d_use.iyi")[0], "Late")
+    count = 0
+    if late = prog.types["Late"]?
+      if late.is_a?(ModuleType)
+        if news = late.as(ModuleType).metaclass.defs["new"]?
+          count = news.size
+        end
+      end
+    end
+    failed += 1 unless check("generated new methods on Late", count.to_s, "1")
+
+    imports = Hash(String, Type).new
+    imports["ProbeMarker"] = prog.int32_type
+    prog.file_imports["probe/scope.iyi"] = imports
+    prog.file_import_defs["probe/scope.iyi"] = Hash(String, Array(Def)).new
+    located = Nop.new
+    located.location = Location.new("probe/./scope.iyi", 1, 1)
+    mv = MainVisitor.new(prog)
+    mv.enter_file_scope(located)
+    found = prog.current_imports["ProbeMarker"]?
+    failed += 1 unless check("import table of probe/./scope.iyi", found ? found.to_s : "missing", "Int32")
+    failed == 0 ? 0 : 1
+  end
+end
+
+exit SelfhostFrontCacheProbe.run

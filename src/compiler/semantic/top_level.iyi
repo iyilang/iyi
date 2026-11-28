@@ -310,6 +310,7 @@ pub abstract class NamedType < Type
 
   def add_type(name : String, type : Type) : Nil
     @types[name] = type
+    @program.bump_shape
   end
 
   def lookup_type(name : String) : Type?
@@ -476,6 +477,7 @@ pub abstract class ModuleType < NamedType
   # the hosted pass does (a user's `def begin_array?` replaces the enum's generated one).
   # Overloads that differ in a restriction are kept side by side.
   def add_def(a_def : Def) : Nil
+    @program.bump_shape
     @program.record_def_owner(a_def, self)
     list = @defs[a_def.name]?
     if list.nil?
@@ -678,6 +680,7 @@ pub abstract class ModuleType < NamedType
   end
 
   def include(mod : Type) : Nil
+    @program.bump_shape
     @parents.insert(0, mod)
     if mod.is_a?(NonGenericModuleType) || (mod.is_a?(TraitType) && !mod.is_a?(GenericTraitType))
       mod.as(ModuleType).add_including_type(self)
@@ -992,6 +995,7 @@ pub abstract class ClassType < ModuleType
   end
 
   def set_superclass(sc : Type?, display_name : String? = nil) : Nil
+    @program.bump_shape
     @superclass = sc
     @superclass_display = display_name || (sc ? sc.to_s : nil)
     if sc
@@ -1420,6 +1424,7 @@ pub class EnumType < ModuleType
     c = Const.new(@program, self, name, val_node)
     c.enum_value_type = self
     @types[name] = c
+    @program.bump_shape
     @members[name] = c
     c
   end
@@ -1612,9 +1617,28 @@ pub class ImplRecord
   end
 end
 
+# The call-lookup levels kept for one looked-up type (MainVisitor#declared_arm_levels), by
+# method name, one table per walk. Holding the type keeps its object id, the cache key,
+# from being reused while the entry lives.
+pub class ArmLevels
+  getter type : Type
+  getter parents_walk : Hash(String, Array(Type)) = Hash(String, Array(Type)).new
+  getter modules_walk : Hash(String, Array(Type)) = Hash(String, Array(Type)).new
+
+  def initialize(@type : Type)
+  end
+end
+
 pub class SemanticProgram < NonGenericModuleType
   getter new_expansions : Array(NewExpansion)
   @new_expansions : Array(NewExpansion) = [] of NewExpansion
+  # Counts the changes to the program's shape: a type registered, a def added, a module
+  # included, a superclass set. Work that reads only the shape (define_new_methods, the
+  # call-lookup levels) records the count it ran at and is redone only once it moves.
+  getter shape_epoch : Int64 = 0_i64
+  property new_methods_epoch : Int64 = -1_i64
+  @arm_levels : Hash(UInt64, ArmLevels) = Hash(UInt64, ArmLevels).new
+  @arm_levels_epoch : Int64 = -1_i64
 
   @object_type : ClassType?
   # Non-raising alias probes can recurse through generic arguments.
@@ -1645,6 +1669,7 @@ pub class SemanticProgram < NonGenericModuleType
   # after them; any other prelude has none.
   def iyi_prelude=(value : Bool) : Nil
     @normalizer.iyi_prelude = value
+    bump_shape
     if value
       unless @types.has_key?("UInt64x2")
         vector = NonGenericClassType.new(self, self, "UInt64x2", value_type)
@@ -1654,6 +1679,26 @@ pub class SemanticProgram < NonGenericModuleType
     elsif vector = @types.delete("UInt64x2")
       value_type.subclasses.delete(vector)
     end
+  end
+
+  def bump_shape : Nil
+    @shape_epoch += 1
+    nil
+  end
+
+  # The call-lookup levels kept for *type*; every entry is dropped once the shape changes.
+  def arm_levels_for(type : Type) : ArmLevels
+    if @arm_levels_epoch != @shape_epoch
+      @arm_levels.clear
+      @arm_levels_epoch = @shape_epoch
+    end
+    id = type.object_id
+    if entry = @arm_levels[id]?
+      return entry
+    end
+    made = ArmLevels.new(type)
+    @arm_levels[id] = made
+    made
   end
 
   def iyi_prelude? : Bool

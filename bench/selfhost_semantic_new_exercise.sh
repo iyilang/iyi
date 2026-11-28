@@ -12,6 +12,14 @@
 # Mutation proofs patch the port's ported code, rebuild the driver, and require a
 # divergence from the hosted oracle. A patch that changes nothing is refused.
 #
+# The front end's caches are checked by bench/selfhost_front_cache_probe.iyi, which
+# must print no FAIL. The generated `new` methods and the call-lookup levels are
+# redone only once the program's shape has changed, and no source file reaches a
+# shape change after the first main visitor, so the probe makes them through the API
+# with a main visitor after each. It also checks that an import table kept under a
+# file's normal name is found from a location spelled otherwise. Four mutation
+# proofs drop an invalidation or the normal-name lookup and require a FAIL.
+#
 #   bash bench/selfhost_semantic_new_exercise.sh
 set -u
 status=0
@@ -74,6 +82,18 @@ if [ "$fixture_count" -eq 0 ] || [ "$fixture_bad" -ne 0 ]; then
   status=1
 fi
 
+echo
+echo "== 2b. The front end's caches see every change (bench/selfhost_front_cache_probe.iyi)"
+"$IYI" build -o "$WORK_NATIVE/front_cache$EXE" "$REPO_NATIVE/bench/selfhost_front_cache_probe.iyi" > "$WORK/front_cache_build.log" 2>&1 \
+  || { cat "$WORK/front_cache_build.log"; echo "FAILED to build the front-cache probe"; exit 1; }
+if "$WORK/front_cache$EXE" > "$WORK/front_cache.out" 2>&1; then
+  awk '{ print "  " $0 }' "$WORK/front_cache.out"
+else
+  awk '{ print "  " $0 }' "$WORK/front_cache.out"
+  echo "  FAILED: the front-cache probe found a stale result"
+  status=1
+fi
+
 # A check for the mutation proofs: rebuilds the port driver from the (patched)
 # sources and requires its output to match the hosted oracle on every fixture.
 # Returns non-zero when a divergence is found, which is the catch.
@@ -81,6 +101,30 @@ invalid_mutant() {
   echo "INVALID MUTANT: $*"
   [ "${_PM_ARMED:-0}" = 1 ]
 }
+# A check for the cache mutation proofs: rebuilds the front-cache probe from the
+# (patched) sources. Returns 1 when the probe reports a stale result, which is the catch.
+check_cache_stale() {
+  rm -f "$WORK/front_cache_m$EXE"
+  if ! "$IYI" build -o "$WORK_NATIVE/front_cache_m$EXE" "$REPO_NATIVE/bench/selfhost_front_cache_probe.iyi" > "$WORK/front_cache_m_build.log" 2>&1 ||
+     [ ! -x "$WORK/front_cache_m$EXE" ]; then
+    cat "$WORK/front_cache_m_build.log"
+    invalid_mutant "front-cache probe failed to build"
+    return $?
+  fi
+  "$WORK/front_cache_m$EXE" > "$WORK/front_cache_m.out" 2>&1
+  local probe_status=$?
+  if [ "$probe_status" -eq 1 ] && grep -q '^FAIL ' "$WORK/front_cache_m.out"; then
+    echo "decisive: $(grep -m 1 '^FAIL ' "$WORK/front_cache_m.out")"
+    return 1
+  fi
+  if [ "$probe_status" -ne 0 ]; then
+    cat "$WORK/front_cache_m.out"
+    invalid_mutant "front-cache probe exited $probe_status"
+    return $?
+  fi
+  return 0
+}
+
 check_new_diverge() {
   rm -f "$WORK/port_m$EXE"
   if ! "$IYI" build -o "$WORK_NATIVE/port_m$EXE" "$REPO_NATIVE/bench/selfhost_semantic_new_exercise.iyi" > "$WORK/port_m_build.log" 2>&1 ||
@@ -174,6 +218,30 @@ prove_mutation "a generic child copies initializers beyond the first ancestor" "
   '  inits = first_initializer_defs(type)' \
   '  inits = MethodLookup.all_defs(type, "initialize", [] of Def)' \
   -- check_new_diverge || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "the generated new methods are not redone after more declarations" "$NEW_FILE" \
+  '  return if program.new_methods_epoch == program.shape_epoch && program.new_expansions.empty?' \
+  '  return if program.new_methods_epoch >= 0_i64 && program.new_expansions.empty?' \
+  -- check_cache_stale || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "the call-lookup levels are kept across a shape change" "$TOP_LEVEL_FILE" \
+  '    if @arm_levels_epoch != @shape_epoch' \
+  '    if @arm_levels_epoch < 0_i64' \
+  -- check_cache_stale || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "adding a def does not change the shape" "$TOP_LEVEL_FILE" \
+  $'  def add_def(a_def : Def) : Nil\n    @program.bump_shape\n' \
+  $'  def add_def(a_def : Def) : Nil\n' \
+  -- check_cache_stale || status=1
+MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
+
+prove_mutation "a file scope is looked up only by the name in the location" "$MAIN_VISITOR_FILE" \
+  '      if imports.nil? || defs.nil?' \
+  '      if false' \
+  -- check_cache_stale || status=1
 MUTATIONS_RUN=$((MUTATIONS_RUN + 1))
 
 echo "  $MUTATIONS_RUN mutation proofs run"

@@ -932,6 +932,7 @@ bench/selfhost_daemon_exercise.iyi
 bench/selfhost_ensure_refusal.iyi
 bench/selfhost_ensure_targets.iyi
 bench/selfhost_formatter_exercise.iyi
+bench/selfhost_front_cache_probe.iyi
 bench/selfhost_loader_if_exercise.iyi
 bench/selfhost_lower_asm_exercise.iyi
 bench/selfhost_lower_calls_exercise.iyi
